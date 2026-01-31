@@ -1,0 +1,1 @@
+- https://walhimer.github.io/rarity-seed/
