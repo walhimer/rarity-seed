@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WEBGL Generative + Rarity Probabilities + Controls</title>
+  <style>
+    html, body { margin:0; padding:0; background:#000; overflow:hidden; }
+    canvas { display:block; }
+
+    .hud {
+      position: fixed;
+      left: 12px; top: 12px;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      color: rgba(255,255,255,0.88);
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 10px;
+      padding: 10px 12px;
+      backdrop-filter: blur(6px);
+      user-select: none;
+      white-space: pre;
+      pointer-events: none;
+      max-width: min(46vw, 520px);
+    }
+
+    .panel {
+      position: fixed;
+      right: 12px; top: 12px;
+      width: min(360px, 48vw);
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      color: rgba(255,255,255,0.9);
+      background: rgba(0,0,0,0.52);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 12px;
+      padding: 10px 12px 12px;
+      backdrop-filter: blur(8px);
+      user-select: none;
+    }
+    .panel h3 {
+      margin: 0 0 8px 0;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.85);
+    }
+    .row { margin: 8px 0; }
+    .row label {
+      display:flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 4px;
+      color: rgba(255,255,255,0.82);
+    }
+    .row .val { color: rgba(255,255,255,0.65); }
+    input[type="range"] { width: 100%; }
+    select, button, input[type="text"], input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      font: inherit;
+      color: rgba(255,255,255,0.92);
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 10px;
+      padding: 7px 8px;
+      outline: none;
+    }
+    button {
+      cursor: pointer;
+      background: rgba(255,255,255,0.10);
+    }
+    button:hover { background: rgba(255,255,255,0.14); }
+    .btnrow { display:flex; gap:8px; }
+    .btnrow button { width: 100%; }
+    .split { display:flex; gap:8px; }
+    .split > * { width: 100%; }
+    .smallnote {
+      margin-top: 8px;
+      color: rgba(255,255,255,0.55);
+      font-size: 11px;
+    }
+    .hr { height:1px; background: rgba(255,255,255,0.12); margin: 10px 0; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+</head>
+<body>
+<script>
+/* =========================================================
+   WEBGL Generative Art + Rarity Probabilities + Control Panel
+   - Edition size test (default 100): simulate rarity distribution.
+   - Probabilities adjustable live (Ultra/Rare/Uncommon; Common auto).
+   - "Simulate" button prints distribution + percentages to console + HUD.
+   - Artwork regenerates with current probabilities and seed.
+   ========================================================= */
+
+let s, rng;
+let gradShader;
+let layers = [];
+let t0 = 0;
+
+let features = {};
+let hud, panel;
+
+let rarityConfig = {
+  editionSize: 100,
+  pUltra: 0.01,
+  pRare: 0.05,
+  pUncommon: 0.15
+};
+
+const VERT = `
+precision highp float;
+attribute vec3 aPosition;
+attribute vec2 aTexCoord;
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+varying vec2 vUv;
+void main() {
+  vUv = aTexCoord;
+  gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aPosition, 1.0);
+}
+`;
+
+const FRAG = `
+precision highp float;
+varying vec2 vUv;
+
+uniform float uTime;
+uniform float uBreath;
+uniform float uVignette;
+uniform float uGrain;
+
+uniform vec3 uA;
+uniform vec3 uB;
+uniform vec3 uC;
+
+float hash21(vec2 p){
+  p = fract(p*vec2(123.34, 345.45));
+  p += dot(p, p+34.345);
+  return fract(p.x*p.y);
+}
+
+float grain(vec2 uv, float amt){
+  float n = hash21(uv + fract(uTime)*37.13);
+  return (n - 0.5) * amt;
+}
+
+void main() {
+  vec2 uv = vUv;
+  vec2 p = uv * 2.0 - 1.0;
+
+  float r = length(p);
+  float w = smoothstep(1.15, 0.0, r);
+
+  float b = 0.5 + 0.5*sin(uTime*0.9);
+  b = mix(0.85, 1.25, b) * uBreath;
+
+  float ang = atan(p.y, p.x);
+  float warp = 0.05 * sin(ang*3.0 + uTime*0.7) * (1.0-r);
+  p += warp * vec2(cos(ang+1.57), sin(ang+1.57));
+
+  float r2 = length(p);
+  float k = pow(smoothstep(1.15, 0.0, r2), 1.15);
+
+  float m1 = smoothstep(0.95, 0.15, r2 * b);
+  float m2 = smoothstep(1.15, 0.25, (abs(p.x) + abs(p.y)) * 0.72 * b);
+
+  vec3 col = mix(uA, uB, m1);
+  col = mix(col, uC, m2 * 0.85);
+
+  float v = smoothstep(1.05, 0.25, r2);
+  col *= mix(1.0, v, uVignette);
+
+  col += grain(uv * 1200.0, uGrain);
+
+  col = pow(max(col, 0.0), vec3(0.95));
+  gl_FragColor = vec4(col * (0.15 + 0.85*k) * w, 1.0);
+}
+`;
+
+/* ---------- PALETTES ---------- */
+
+const PALETTES = [
+  { name:"Electric Dusk", cols:[[0.95,0.20,0.62],[0.20,0.78,0.95],[0.96,0.86,0.25]] },
+  { name:"Infra Noir",     cols:[[0.95,0.25,0.20],[0.85,0.10,0.55],[0.25,0.92,0.78]] },
+  { name:"Mineral Light",  cols:[[0.82,0.90,0.98],[0.55,0.76,0.96],[0.98,0.78,0.55]] },
+  { name:"Ultraviolet",    cols:[[0.62,0.30,0.98],[0.20,0.95,0.85],[0.98,0.22,0.62]] },
+  { name:"Arctic Signal",  cols:[[0.70,0.92,0.98],[0.18,0.62,0.98],[0.95,0.96,0.98]] },
+];
+
+/* =========================================================
+   SETUP / DRAW
+   ========================================================= */
+
+function setup() {
+  createCanvas(windowWidth, windowHeight, WEBGL);
+  pixelDensity(2);
+  noStroke();
+
+  s = makeSeedFromHash();
+  rng = mulberry32(s);
+
+  gradShader = createShader(VERT, FRAG);
+
+  buildHUD();
+  buildPanel();
+
+  regenerateArtwork(true);
+
+  t0 = millis() * 0.001;
+}
+
+function draw() {
+  const t = millis() * 0.001 - t0;
+
+  background(0);
+
+  const camDist = map(features["Depth Range"], 1, 8, 720, 1600);
+  const tilt = map(features["Tilt"], 0, 100, -0.28, 0.28);
+  const orbit = map(features["Orbit"], 0, 100, 0.00, 0.55);
+  const rotSpeed = mapSpeed(features["Rotation Speed"]);
+  const wobble = (features["Motion"] === "Drift") ? 0.35 : (features["Motion"] === "Pulse") ? 0.55 : (features["Motion"] === "Tide") ? 0.9 : 0.0;
+
+  const cx = (orbit > 0.0) ? cos(t * orbit * (0.7 + 0.3*wobble)) * camDist * 0.18 : 0.0;
+  const cy = (orbit > 0.0) ? sin(t * orbit * (0.54 + 0.23*wobble)) * camDist * 0.10 : 0.0;
+  const cz = camDist;
+
+  camera(cx, cy, cz, 0, 0, 0, 0, 1, 0);
+  rotateX(tilt);
+  rotateY(t * rotSpeed);
+
+  ambientLight(120);
+  directionalLight(255, 255, 255, -0.35, 0.4, -0.7);
+
+  const breathBase = (features["Motion"] === "Pulse") ? 1.35 : (features["Motion"] === "Drift") ? 1.0 : 1.15;
+  const bAmt = (features["Breath"] === "Low") ? 0.85 : (features["Breath"] === "High") ? 1.35 : 1.1;
+  const vign = (features["Vignette"] === "Soft") ? 0.35 : (features["Vignette"] === "Hard") ? 0.85 : 0.6;
+  const grn  = (features["Grain"] === "None") ? 0.0  : (features["Grain"] === "Fine") ? 0.05 : 0.11;
+
+  for (let i = 0; i < layers.length; i++) {
+    push();
+
+    const L = layers[i];
+    translate(0, 0, L.z);
+
+    if (features["Motion"] !== "Still") {
+      const w = 0.6 + 0.4 * sin(t*0.9 + L.phase);
+      rotateY((w - 0.5) * 0.22 * wobble);
+      rotateX((w - 0.5) * 0.12 * wobble);
+    }
+
+    const alpha = 0.92;
+    ambientMaterial(L.body[0], L.body[1], L.body[2], alpha * 255);
+
+    push();
+    scale(L.sx, L.sy, 1);
+    box(L.w, L.h, L.d, 2, 2);
+    pop();
+
+    push();
+    translate(0, 0, L.d * 0.51 + 0.6);
+    shader(gradShader);
+
+    gradShader.setUniform("uTime", t + L.phase);
+    gradShader.setUniform("uBreath", breathBase * bAmt);
+    gradShader.setUniform("uVignette", vign);
+    gradShader.setUniform("uGrain", grn);
+
+    gradShader.setUniform("uA", L.cA);
+    gradShader.setUniform("uB", L.cB);
+    gradShader.setUniform("uC", L.cC);
+
+    plane(L.w * L.sx, L.h * L.sy);
+
+    resetShader();
+    pop();
+
+    pop();
+  }
+
+  window.$fxhashFeatures = features;
+  hud.html(formatFeatures(features));
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
+/* =========================================================
+   RARITY / PROBABILITIES
+   ========================================================= */
+
+function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+
+function getRarityThresholds() {
+  // thresholds: Ultra < tU, Rare < tR, Uncommon < tN, else Common
+  const pU = clamp01(rarityConfig.pUltra);
+  const pR = clamp01(rarityConfig.pRare);
+  const pN = clamp01(rarityConfig.pUncommon);
+
+  // ensure total <= 1
+  let total = pU + pR + pN;
+  if (total > 1.0) {
+    // normalize down if user overshoots
+    const k = 1.0 / total;
+    return {
+      tUltra: pU * k,
+      tRare:  (pU + pR) * k,
+      tUnc:   (pU + pR + pN) * k
+    };
+  }
+
+  return {
+    tUltra: pU,
+    tRare:  pU + pR,
+    tUnc:   pU + pR + pN
+  };
+}
+
+function pickRarityFromRand(r) {
+  const T = getRarityThresholds();
+  if (r < T.tUltra) return "Ultra-Rare";
+  if (r < T.tRare)  return "Rare";
+  if (r < T.tUnc)   return "Uncommon";
+  return "Common";
+}
+
+function simulateEdition(size = 100) {
+  const counts = {
+    "Ultra-Rare": 0,
+    "Rare": 0,
+    "Uncommon": 0,
+    "Common": 0
+  };
+
+  for (let i = 0; i < size; i++) {
+    const tier = pickRarityFromRand(Math.random());
+    counts[tier]++;
+  }
+
+  const pct = {};
+  for (const k in counts) pct[k] = ((counts[k] / size) * 100).toFixed(1) + "%";
+
+  console.log("=== RARITY SIMULATION ===");
+  console.log("Edition size:", size);
+  console.log("Probabilities (Ultra/Rare/Uncommon/Common):",
+    rarityConfig.pUltra,
+    rarityConfig.pRare,
+    rarityConfig.pUncommon,
+    (1 - clamp01(rarityConfig.pUltra) - clamp01(rarityConfig.pRare) - clamp01(rarityConfig.pUncommon)).toFixed(3)
+  );
+  console.table(counts);
+  console.table(pct);
+
+  return { counts, pct };
+}
+
+/* =========================================================
+   ARTWORK REGEN (uses probabilities)
+   ========================================================= */
+
+function regenerateArtwork(resetSeedRng=false) {
+  if (resetSeedRng) {
+    rng = mulberry32(s);
+  }
+
+  // 1) pick a rarity tier for THIS visible output (based on probabilities)
+  const rarityTier = pickRarityFromRand(rnd());
+
+  // 2) map rarity -> trait adjustments (these are the visible differences)
+  // Common: restrained, Ultra-Rare: more extreme / higher impact.
+  let paletteName;
+  if (rarityTier === "Ultra-Rare") {
+    paletteName = "Ultraviolet";
+  } else if (rarityTier === "Rare") {
+    paletteName = "Electric Dusk";
+  } else if (rarityTier === "Uncommon") {
+    paletteName = "Infra Noir";
+  } else {
+    paletteName = "Mineral Light";
+  }
+
+  const panels = (rarityTier === "Ultra-Rare") ? 8 :
+                 (rarityTier === "Rare")       ? 7 :
+                 (rarityTier === "Uncommon")   ? 6 : 5;
+
+  const motion = (rarityTier === "Ultra-Rare") ? "Tide" :
+                 (rarityTier === "Rare")       ? "Pulse" :
+                 (rarityTier === "Uncommon")   ? "Drift" : "Still";
+
+  const breath = (rarityTier === "Ultra-Rare") ? "High" :
+                 (rarityTier === "Rare")       ? "Medium" :
+                 (rarityTier === "Uncommon")   ? "Medium" : "Low";
+
+  const grain  = (rarityTier === "Ultra-Rare") ? "Coarse" :
+                 (rarityTier === "Rare")       ? "Fine" :
+                 (rarityTier === "Uncommon")   ? "Fine" : "None";
+
+  const vign   = (rarityTier === "Ultra-Rare") ? "Hard" :
+                 (rarityTier === "Rare")       ? "Medium" :
+                 (rarityTier === "Uncommon")   ? "Medium" : "Soft";
+
+  // 3) build features (still adjustable via UI; UI can override these)
+  features = {
+    "Edition Test Size": rarityConfig.editionSize,
+    "Rarity Tier": rarityTier,
+
+    "Palette": paletteName,
+    "Panels": panels,
+    "Structure": "Aligned",
+
+    "Motion": motion,
+    "Rotation Speed": (rarityTier === "Ultra-Rare") ? "Fast" :
+                      (rarityTier === "Rare")       ? "Medium" :
+                      (rarityTier === "Uncommon")   ? "Medium" : "Slow",
+
+    "Breath": breath,
+    "Grain": grain,
+    "Vignette": vign,
+
+    "Depth Range": (rarityTier === "Ultra-Rare") ? 7 :
+                   (rarityTier === "Rare")       ? 6 :
+                   (rarityTier === "Uncommon")   ? 5 : 4,
+
+    "Orbit": (rarityTier === "Ultra-Rare") ? 55 :
+             (rarityTier === "Rare")       ? 40 :
+             (rarityTier === "Uncommon")   ? 28 : 10,
+
+    "Tilt": 50,
+
+    // Store the probability settings used
+    "p(Ultra)": rarityConfig.pUltra,
+    "p(Rare)": rarityConfig.pRare,
+    "p(Uncommon)": rarityConfig.pUncommon,
+    "p(Common)": Math.max(0, 1 - rarityConfig.pUltra - rarityConfig.pRare - rarityConfig.pUncommon)
+  };
+
+  // Sync UI controls to current config + features
+  syncUIFromState();
+
+  // Build geometry based on features
+  buildLayers();
+
+  // Run one simulation so you see approx rarity immediately
+  const sim = simulateEdition(rarityConfig.editionSize);
+  features["Sim Result"] = `${sim.counts["Ultra-Rare"]}/${sim.counts["Rare"]}/${sim.counts["Uncommon"]}/${sim.counts["Common"]}`;
+}
+
+/* =========================================================
+   HUD + PANEL
+   ========================================================= */
+
+function buildHUD() {
+  hud = createDiv("");
+  hud.addClass("hud");
+}
+
+function buildPanel() {
+  panel = createDiv("");
+  panel.addClass("panel");
+  panel.html(`
+    <h3>Rarity Test Controls</h3>
+
+    <div class="row">
+      <label>Edition size (test)<span class="val" id="edVal"></span></label>
+      <input id="edN" type="number" min="1" max="10000" step="1" value="100" />
+    </div>
+
+    <div class="hr"></div>
+
+    <div class="row">
+      <label>Ultra-Rare probability<span class="val" id="pUVal"></span></label>
+      <input id="pU" type="range" min="0" max="0.20" step="0.001" />
+    </div>
+
+    <div class="row">
+      <label>Rare probability<span class="val" id="pRVal"></span></label>
+      <input id="pR" type="range" min="0" max="0.50" step="0.001" />
+    </div>
+
+    <div class="row">
+      <label>Uncommon probability<span class="val" id="pNVal"></span></label>
+      <input id="pN" type="range" min="0" max="0.80" step="0.001" />
+    </div>
+
+    <div class="row">
+      <label>Common (auto)<span class="val" id="pCVal"></span></label>
+      <input id="pC" type="text" readonly />
+    </div>
+
+    <div class="btnrow">
+      <button id="simBtn">Simulate</button>
+      <button id="regenBtn">Regenerate Output</button>
+    </div>
+
+    <div class="hr"></div>
+
+    <div class="row">
+      <label>Seed (URL hash)<span class="val" id="seedVal"></span></label>
+      <input id="seedInput" type="text" placeholder="any text" />
+    </div>
+
+    <div class="btnrow">
+      <button id="applySeedBtn">Apply Seed</button>
+      <button id="randomSeedBtn">Random Seed</button>
+    </div>
+
+    <div class="btnrow" style="margin-top:10px;">
+      <button id="hideBtn">Hide Panel</button>
+    </div>
+
+    <div class="smallnote">
+      Simulate prints counts + percentages to the console.
+      Regenerate Output creates a new visible piece using the probabilities.
+      If Ultra+Rare+Uncommon exceeds 1.0, thresholds are normalized automatically.
+    </div>
+  `);
+
+  // wire controls
+  select("#simBtn").mousePressed(() => {
+    pullUIToConfig();
+    const sim = simulateEdition(rarityConfig.editionSize);
+    features["Sim Result"] = `${sim.counts["Ultra-Rare"]}/${sim.counts["Rare"]}/${sim.counts["Uncommon"]}/${sim.counts["Common"]}`;
+  });
+
+  select("#regenBtn").mousePressed(() => {
+    pullUIToConfig();
+    // change visible output by advancing RNG
+    // (keeps seed deterministic but produces new output sequence)
+    regenerateArtwork(false);
+  });
+
+  select("#applySeedBtn").mousePressed(() => {
+    const v = (select("#seedInput").value() || "").trim();
+    if (v.length === 0) return;
+    setSeedFromString(v);
+    rng = mulberry32(s);
+    regenerateArtwork(true);
+  });
+
+  select("#randomSeedBtn").mousePressed(() => {
+    const r = (Math.random() * 0xFFFFFFFF) >>> 0;
+    setSeedFromString(r.toString(16));
+    rng = mulberry32(s);
+    regenerateArtwork(true);
+  });
+
+  select("#hideBtn").mousePressed(() => togglePanel());
+
+  // live update readouts as sliders move (no regen until buttons pressed)
+  select("#pU").input(syncProbReadouts);
+  select("#pR").input(syncProbReadouts);
+  select("#pN").input(syncProbReadouts);
+  select("#edN").input(() => {
+    select("#edVal").html(String(int(select("#edN").value())));
+  });
+
+  // initial sync
+  syncUIFromState();
+}
+
+function togglePanel() {
+  const el = panel.elt;
+  if (el.style.display === "none") {
+    el.style.display = "block";
+    const btn = document.getElementById("showPanelBtn");
+    if (btn) btn.remove();
+  } else {
+    el.style.display = "none";
+    if (!document.getElementById("showPanelBtn")) {
+      const btn = document.createElement("button");
+      btn.id = "showPanelBtn";
+      btn.textContent = "Show Controls";
+      btn.style.position = "fixed";
+      btn.style.right = "12px";
+      btn.style.top = "12px";
+      btn.style.zIndex = "9999";
+      btn.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace";
+      btn.style.color = "rgba(255,255,255,0.92)";
+      btn.style.background = "rgba(0,0,0,0.52)";
+      btn.style.border = "1px solid rgba(255,255,255,0.18)";
+      btn.style.borderRadius = "12px";
+      btn.style.padding = "8px 10px";
+      btn.style.backdropFilter = "blur(8px)";
+      btn.onclick = () => {
+        panel.elt.style.display = "block";
+        btn.remove();
+      };
+      document.body.appendChild(btn);
+    }
+  }
+}
+
+function syncUIFromState() {
+  select("#edN").value(rarityConfig.editionSize);
+  select("#edVal").html(String(rarityConfig.editionSize));
+
+  select("#pU").value(rarityConfig.pUltra);
+  select("#pR").value(rarityConfig.pRare);
+  select("#pN").value(rarityConfig.pUncommon);
+
+  select("#seedVal").html(String(s));
+  select("#seedInput").value(String(s));
+
+  syncProbReadouts();
+}
+
+function pullUIToConfig() {
+  rarityConfig.editionSize = int(select("#edN").value());
+  rarityConfig.pUltra = float(select("#pU").value());
+  rarityConfig.pRare = float(select("#pR").value());
+  rarityConfig.pUncommon = float(select("#pN").value());
+  syncProbReadouts();
+}
+
+function syncProbReadouts() {
+  const pU = float(select("#pU").value());
+  const pR = float(select("#pR").value());
+  const pN = float(select("#pN").value());
+  const pCraw = 1 - pU - pR - pN;
+  const pC = Math.max(0, pCraw);
+
+  select("#pUVal").html(pU.toFixed(3));
+  select("#pRVal").html(pR.toFixed(3));
+  select("#pNVal").html(pN.toFixed(3));
+  select("#pCVal").html(pC.toFixed(3));
+  select("#pC").value(pC.toFixed(3));
+}
+
+/* =========================================================
+   LAYERS / GEOMETRY
+   ========================================================= */
+
+function buildLayers() {
+  layers.length = 0;
+
+  const pal = paletteByName(features["Palette"]);
+  const n = features["Panels"];
+  const depthRange = features["Depth Range"];
+  const zSpan = map(depthRange, 1, 8, 110, 520);
+
+  const baseW = min(width, height) * 0.56;
+  const baseH = min(width, height) * 0.42;
+
+  const structure = features["Structure"];
+
+  for (let i = 0; i < n; i++) {
+    const u = (n <= 1) ? 0.5 : i / (n - 1);
+
+    const w = baseW * lerp(0.62, 1.05, 1.0 - abs(u - 0.5) * 1.25);
+    const h = baseH * lerp(0.55, 1.00, abs(u - 0.5) * 0.9);
+    const d = lerp(28, 78, rnd());
+
+    let sx = 1.0, sy = 1.0;
+    if (structure === "Aligned") {
+      sx = 1.0; sy = 1.0;
+    } else if (structure === "Staggered") {
+      sx = 0.94 + 0.12 * sin(i * 1.7);
+      sy = 0.94 + 0.12 * cos(i * 1.5);
+    } else {
+      sx = 0.88 + 0.22 * rnd();
+      sy = 0.88 + 0.22 * rnd();
+    }
+
+    const z = lerp(-zSpan, zSpan, u) + (i - (n - 1) * 0.5) * 2.2;
+
+    const cA = pal[(i + 0) % pal.length];
+    const cB = pal[(i + 1) % pal.length];
+    const cC = pal[(i + 2) % pal.length];
+    const body = mix3(cA, cB, cC, 0.38);
+
+    layers.push({
+      w, h, d, z,
+      sx, sy,
+      phase: rnd() * 10.0,
+      cA, cB, cC,
+      body
+    });
+  }
+}
+
+function paletteByName(name) {
+  for (const p of PALETTES) if (p.name === name) return p.cols;
+  return PALETTES[0].cols;
+}
+
+/* =========================================================
+   HUD TEXT
+   ========================================================= */
+
+function formatFeatures(f) {
+  const keys = Object.keys(f);
+  let out = "ATTRIBUTES\n";
+  for (let i = 0; i < keys.length; i++) out += `${keys[i]}: ${f[keys[i]]}\n`;
+  out += `\nSeed: ${s}`;
+  return out;
+}
+
+/* =========================================================
+   RNG / SEED
+   ========================================================= */
+
+function makeSeedFromHash() {
+  const h = (location.hash || "").replace("#", "").trim();
+  if (h.length > 0) return hashToUint32(h);
+  const r = (Math.random() * 0xFFFFFFFF) >>> 0;
+  try { history.replaceState(null, "", "#" + r.toString(16)); } catch(e) {}
+  return r;
+}
+
+function setSeedFromString(str) {
+  const cleaned = String(str).trim();
+  const newSeed = hashToUint32(cleaned);
+  s = newSeed >>> 0;
+  try { history.replaceState(null, "", "#" + cleaned); } catch(e) {}
+  select("#seedVal").html(String(s));
+}
+
+function hashToUint32(str) {
+  let x = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    x ^= str.charCodeAt(i);
+    x = Math.imul(x, 16777619);
+  }
+  return x >>> 0;
+}
+
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function rnd() { return rng(); }
+
+/* =========================================================
+   UTIL
+   ========================================================= */
+
+function mapSpeed(label) {
+  if (label === "Slow") return 0.12;
+  if (label === "Fast") return 0.55;
+  return 0.28;
+}
+
+function mix3(a, b, c, k) {
+  const m = [
+    (a[0] + b[0] + c[0]) / 3,
+    (a[1] + b[1] + c[1]) / 3,
+    (a[2] + b[2] + c[2]) / 3
+  ];
+  return [m[0]*k, m[1]*k, m[2]*k];
+}
+</script>
+</body>
+</html>
+
+
